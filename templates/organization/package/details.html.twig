@@ -1,0 +1,149 @@
+{% extends 'base.html.twig' %}
+
+{% block header %}
+    <a href="{{ path('organization_packages', {"organization":organization.alias}) }}"
+       class="btn btn-secondary px-1 mr-1" title="Package List">
+        <span class="text-muted mr-1">&laquo;</span>
+        {% include 'svg/package.svg' %}
+    </a>
+
+    {{ package.name }} details
+{% endblock %}
+{% block header_btn %}
+    {% include 'component/packageActions.html.twig' %}
+{% endblock %}
+
+{% block content %}
+
+    {% if package.name %}
+        <div class="row">
+            <div class="col-6">
+                <h4>Package name</h4>
+                <p>{{ package.name }}</p>
+            </div>
+            <div class="col-6">
+                <h4>Description</h4>
+                <p>{{ package.description }}</p>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="col-6">
+                <h4>Total Installs</h4>
+                <p>
+                    <a href="{{ path('organization_package_stats', {organization: organization.alias, package: package.id}) }}"
+                       class="number-format">
+                        {{ installs.total }}
+                    </a>
+                </p>
+            </div>
+            <div class="col-6">
+                <h4>Security</h4>
+                <p>
+                    <a
+                            href="{{ path('organization_package_scan_results', {organization: organization.alias, package: package.id}) }}"
+                            data-content="{% apply escape %}{% include 'organization/package/scanResultContent.html.twig' with {'result': package.lastScanResultContent, 'simple': true} %}{% endapply %}"
+                            data-data-toggle="tooltip" title="{{ package.scanResultDate|date_time|time_diff }}"
+                            data-toggle="scan-result-popover"
+                    >
+                        {% if package.isScanResultOk %}
+                            <span class="badge badge-success">{{ package.scanResultStatus }}</span>
+                        {% elseif package.isScanResultPending or package.isScanResultNotAvailable %}
+                            <span class="badge badge-warning">{{ package.scanResultStatus }}</span>
+                        {% else %}
+                            <span class="badge badge-danger">{{ package.scanResultStatus }}</span>
+                        {% endif %}
+                    </a>
+                </p>
+            </div>
+        </div>
+
+        {% if package.latestReleaseDate %}
+            <div class="row">
+                <div class="col-6">
+                    <h4>Latest version</h4>
+                    <p>
+                        {{ package.latestReleasedVersion }} (released:
+                        <span data-toggle="tooltip"
+                              title="{{ package.latestReleaseDate|date_time_utc }} ({{ gmt_offset() }})">
+                            {{ package.latestReleaseDate|date_time_utc|time_diff }}</span>)
+                    </p>
+                </div>
+                <div class="col-6">
+                    <h4>Composer require command</h4>
+                    <div class="row">
+                        <div class="input-group col-11">
+                            <input id="composer-require" class="form-control" readonly value="composer require {{ package.name }}"/>
+                            <span class="input-group-append">
+                        <button data-clipboard-target="#composer-require" class="copy-to-clipboard btn btn-primary p-2" type="button" data-toggle="tooltip" data-placement="top" title="Copy to clipboard">
+                            {% include 'svg/clipboard.svg' %}
+                        </button>
+                    </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        {% endif %}
+
+        <hr />
+
+        <h3>Available versions {% if package.keepLastReleases > 0 %}(limited to: {{ package.keepLastReleases }}){% endif %}</h3>
+
+        {% if count == 0 %}
+            <p>
+                To see available versions of the package, please perform synchronization again.
+            </p>
+            <a
+                data-target="confirmation"
+                data-action="{{ path('organization_package_update', {organization: organization.alias, package: package.id }) }}"
+                data-method="POST"
+                href="#"
+                class="btn btn-success">
+                {% include 'svg/refresh.svg' %} Sync now
+            </a>
+        {% else %}
+            <table class="table">
+                <thead>
+                <tr>
+                    <th>Version</th>
+                    <th>Released</th>
+                    <th>Reference</th>
+                    <th>Size</th>
+                    <th></th>
+                </tr>
+                </thead>
+                <tbody>
+                {% for version in versions %}
+                    <tr>
+                        <td>{{ version.version }}</td>
+                        <td>
+                            <span data-toggle="tooltip" title="{{ version.date|date_time_utc }} ({{ gmt_offset() }})">
+                                {{ version.date|date_time_utc|time_diff }}
+                            </span>
+                        </td>
+                        <td>{{ version.reference }}</td>
+                        <td>{{ version.size | format_bytes }}</td>
+                        <td>
+                            <div class="input-group">
+                                <input id="version-{{ version.reference }}" class="form-control" readonly value="composer require {{ package.name }}:{{ version.version }}"/>
+                                <span class="input-group-append">
+                            <button data-clipboard-target="#version-{{ version.reference }}" class="copy-to-clipboard btn btn-primary p-2" type="button" data-toggle="tooltip" data-placement="top"
+                                    title="Copy to clipboard">
+                                {% include 'svg/clipboard.svg' %}
+                            </button>
+                        </span>
+                            </div>
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            {% include 'component/pagination.html.twig' with {'path_name': 'organization_package_details', 'path_params': {'organization': organization.alias, 'package': package.id}} %}
+        {% endif %}
+    {% else %}
+        <div class="alert alert-warning">
+            This package is not synced yet!
+        </div>
+    {% endif %}
+
+{% endblock %}

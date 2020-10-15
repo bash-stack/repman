@@ -6,6 +6,7 @@ namespace Buddy\Repman\Command;
 
 use Buddy\Repman\Service\Downloader;
 use Buddy\Repman\Service\Proxy\ProxyRegister;
+use Buddy\Repman\Service\Stream;
 use Symfony\Component\Cache\Adapter\AdapterInterface;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
@@ -13,9 +14,11 @@ use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Lock\LockFactory;
 use Symfony\Component\Lock\LockInterface;
 
-class ProxySyncReleasesCommand extends Command
+final class ProxySyncReleasesCommand extends Command
 {
     const LOCK_TTL = 30;
+
+    protected static $defaultName = 'repman:proxy:sync-releases';
 
     private ProxyRegister $register;
     private Downloader $downloader;
@@ -39,7 +42,6 @@ class ProxySyncReleasesCommand extends Command
     protected function configure()
     {
         $this
-            ->setName('repman:proxy:sync-releases')
             ->setDescription('Sync proxy releases with packagist.org')
         ;
     }
@@ -80,7 +82,7 @@ class ProxySyncReleasesCommand extends Command
             list($name, $version) = explode(' ', (string) $item->guid);
             if (isset($syncedPackages[$name])) {
                 $this->lock->refresh();
-                $proxy->downloadByVersion($name, $version);
+                $proxy->download($name, $version);
             }
         }
     }
@@ -102,12 +104,12 @@ class ProxySyncReleasesCommand extends Command
 
     private function loadFeed(): \SimpleXMLElement
     {
-        $string = $this
+        $stream = $this
             ->downloader
             ->getContents('https://packagist.org/feeds/releases.rss')
-            ->getOrElse('');
+            ->getOrElse(Stream::fromString(''));
 
-        $xml = @simplexml_load_string($string);
+        $xml = @simplexml_load_string((string) stream_get_contents($stream));
         if ($xml === false) {
             throw new \RunTimeException('Unable to parse RSS feed');
         }

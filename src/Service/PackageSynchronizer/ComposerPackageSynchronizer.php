@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Buddy\Repman\Service\PackageSynchronizer;
 
 use Buddy\Repman\Entity\Organization\Package;
+use Buddy\Repman\Entity\Organization\Package\Version;
 use Buddy\Repman\Repository\PackageRepository;
 use Buddy\Repman\Service\Dist;
 use Buddy\Repman\Service\Dist\Storage;
@@ -19,6 +20,7 @@ use Composer\Package\CompletePackage;
 use Composer\Repository\RepositoryFactory;
 use Composer\Repository\RepositoryInterface;
 use Composer\Semver\Comparator;
+use Ramsey\Uuid\Uuid;
 use Symfony\Component\Console\Output\OutputInterface;
 
 final class ComposerPackageSynchronizer implements PackageSynchronizer
@@ -56,7 +58,7 @@ final class ComposerPackageSynchronizer implements PackageSynchronizer
 
             foreach ($packages as $p) {
                 $json['packages'][$p->getPrettyName()][$p->getPrettyVersion()] = $this->packageNormalizer->normalize($p);
-                if (Comparator::greaterThan($p->getVersion(), $latest->getVersion()) && $p->getStability() === 'stable') {
+                if (Comparator::greaterThan($p->getVersion(), $latest->getVersion()) && $p->getStability() === Version::STABILITY_STABLE) {
                     $latest = $p;
                 }
             }
@@ -71,20 +73,75 @@ final class ComposerPackageSynchronizer implements PackageSynchronizer
                 throw new \RuntimeException("Package {$name} already exists. Package name must be unique within organization.");
             }
 
+            $versions = [];
             foreach ($packages as $p) {
                 if ($p->getDistUrl() !== null) {
-                    $this->distStorage->download(
-                        $p->getDistUrl(),
-                        new Dist($package->organizationAlias(), $p->getPrettyName(), $p->getVersion(), $p->getDistReference() ?? $p->getDistSha1Checksum(), $p->getDistType()),
-                        $this->getAuthHeaders($package)
-                    );
+                    $versions[] = [
+                        'organizationAlias' => $package->organizationAlias(),
+                        'packageName' => $p->getPrettyName(),
+                        'prettyVersion' => $p->getPrettyVersion(),
+                        'version' => $p->getVersion(),
+                        'ref' => $p->getDistReference() ?? $p->getDistSha1Checksum(),
+                        'distType' => $p->getDistType(),
+                        'distUrl' => $p->getDistUrl(),
+                        'authHeaders' => $this->getAuthHeaders($package),
+                        'releaseDate' => \DateTimeImmutable::createFromMutable($p->getReleaseDate() ?? new \DateTime()),
+                        'stability' => $p->getStability(),
+                    ];
                 }
+            }
+
+            usort($versions, fn ($item1, $item2) => $item2['releaseDate'] <=> $item1['releaseDate']);
+
+            $encounteredVersions = [];
+            foreach ($versions as $version) {
+                $dist = new Dist(
+                    $version['organizationAlias'],
+                    $version['packageName'],
+                    $version['version'],
+                    $version['ref'],
+                    $version['distType']
+                );
+
+                if ($package->keepLastReleases() > 0 && count($encounteredVersions) >= $package->keepLastReleases()) {
+                    $this->distStorage->remove($dist);
+                    $package->removeVersion(new Version(
+                        Uuid::uuid4(),
+                        $version['prettyVersion'],
+                        $version['ref'],
+                        0,
+                        $version['releaseDate'],
+                        $version['stability']
+                    ));
+
+                    continue;
+                }
+
+                $this->distStorage->download(
+                    $version['distUrl'],
+                    $dist,
+                    $this->getAuthHeaders($package)
+                );
+
+                $package->addOrUpdateVersion(
+                    new Version(
+                        Uuid::uuid4(),
+                        $version['prettyVersion'],
+                        $version['ref'],
+                        $this->distStorage->size($dist),
+                        $version['releaseDate'],
+                        $version['stability']
+                    )
+                );
+
+                $encounteredVersions[] = $version['prettyVersion'];
             }
 
             $package->syncSuccess(
                 $name,
                 $latest instanceof CompletePackage ? ($latest->getDescription() ?? 'n/a') : 'n/a',
-                $latest->getStability() === 'stable' ? $latest->getPrettyVersion() : 'no stable release',
+                $latest->getStability() === Version::STABILITY_STABLE ? $latest->getPrettyVersion() : 'no stable release',
+                $encounteredVersions,
                 \DateTimeImmutable::createFromMutable($latest->getReleaseDate() ?? new \DateTime()),
             );
 
@@ -140,6 +197,13 @@ final class ComposerPackageSynchronizer implements PackageSynchronizer
                 ],
             ],
         ]);
+        if ($package->type() === 'gitlab-oauth') {
+            $config->merge([
+                'config' => [
+                    'gitlab-domains' => [(string) parse_url($this->gitlabUrl, PHP_URL_HOST)],
+                ],
+            ]);
+        }
 
         return $config;
     }

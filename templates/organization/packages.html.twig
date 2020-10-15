@@ -15,12 +15,31 @@
     <table class="table">
         <thead>
             <tr>
-                <th>Name</th>
-                <th>Version</th>
-                <th>Released</th>
+                <td colspan="7">
+                    <form action="{{ path('organization_packages', {organization: organization.alias}) }}" method="get" class="form-inline">
+                        <label for="package-search" class="mr-2">Search:</label>
+                        <input type="search" id="package-search" name="search" value="{{ filter.searchTerm }}" class="form-control" />
+
+                        <label class="ml-auto text-right">
+                            Show
+                            <input type="number" name="limit" value="{{ filter.limit }}" class="form-control w-25 mx-2" min="1" />
+                            entries
+                        </label>
+
+                        <button class="btn btn-outline-primary btn-sm">Filter</button>
+                    </form>
+                </td>
+            </tr>
+            <tr>
+                <th>Name {% include 'component/sort.html.twig' with {column: 'name'} %}</th>
+                <th>Latest version {% include 'component/sort.html.twig' with {column: 'version'} %}</th>
+                <th>Released {% include 'component/sort.html.twig' with {column: 'date'} %}</th>
                 <th>Description</th>
-                <th>Webhook</th>
-                <th></th>
+                {% if is_granted('ROLE_ORGANIZATION_MEMBER', organization) %}
+                    <th>Webhook</th>
+                    <th>Security</th>
+                    <th></th>
+                {% endif %}
             </tr>
         </thead>
         <tbody>
@@ -28,11 +47,15 @@
                 <tr>
                     <td>
                         {% if package.name %}
-                            <strong>{{ package.name }}</strong><br />
+                            <strong>
+                                <a href="{{ path('organization_package_details', {organization: organization.alias, package: package.id}) }}">
+                                    {{ package.name }}
+                                </a>
+                            </strong><br />
                             <small class="font-italic" style="font-size: 0.7em"><a href="{{ package.url }}" target="_blank" rel="nofollow noopener noreferrer">
                                 {{ package.url }}
                             </a></small><br />
-                            <small class="font-italic" style="font-size: 0.7em" title="{{ package.lastSyncAt | date('Y-m-d H:i:s') }}">synced: {{ package.lastSyncAt | time_diff }}</small>
+                            <small class="font-italic" style="font-size: 0.7em" data-toggle="tooltip" title="{{ package.lastSyncAt|date_time }} ({{ gmt_offset() }})">synced: {{ package.lastSyncAt|date_time|time_diff }}</small>
                         {% elseif package.lastSyncError is null %}
                             Synchronizing from <a href="{{ package.url }}" target="_blank" rel="nofollow noopener noreferrer">
                                 {{ package.url }}
@@ -45,13 +68,13 @@
                     <td>{{ package.latestReleasedVersion }}</td>
                     <td>
                         {% if package.latestReleaseDate %}
-                            <span title="{{ package.latestReleaseDate | date('Y-m-d H:i:s') }}">{{ package.latestReleaseDate | time_diff }}</span>
+                            <span data-toggle="tooltip" title="{{ package.latestReleaseDate|date_time_utc }} ({{ gmt_offset() }})">{{ package.latestReleaseDate|date_time_utc|time_diff }}</span>
                         {% endif %}
                     </td>
                     <td>
                         {% if package.lastSyncError %}
                             <div class="badge bg-danger">Synchronization error</div>
-                            <small class="font-italic" style="font-size: 0.7em" title="{{ package.lastSyncAt | date('Y-m-d H:i:s') }}">{{ package.lastSyncAt | time_diff }}</small>
+                            <small class="font-italic" style="font-size: 0.7em" data-toggle="tooltip" title="{{ package.lastSyncAt|date_time }} ({{ gmt_offset() }})">{{ package.lastSyncAt|date_time|time_diff }}</small>
                             <div class="highlight p-3 font-monospace" style="font-size: 0.6em;">
                                 {{ package.lastSyncError | nl2br }}
                             </div>
@@ -59,58 +82,58 @@
                             {{ package.description }}
                         {% endif %}
                     </td>
-                    <td class="text-center">
-                        {% if package.webhookCreatedAt is not empty %}
-                            <span class="font-weight-bold" title="{{ package.webhookCreatedAt | date('Y-m-d H:i:s') }}">created</span>
-                        {% else %}
-                            <small>N/A</small>
-                        {% endif %}
-                    </td>
-                    <td>
-                        <span class="dropdown ml-1">
-                            <button class="btn btn-secondary dropdown-toggle align-text-top" data-toggle="dropdown">Actions</button>
-                            <div class="dropdown-menu">
-                            {% if package.name %}
-                                <a href="{{ path('organization_package_stats', {organization: organization.alias, package: package.id}) }}" class="dropdown-item">
-                                    {% include 'svg/bar-chart.svg' %} Statistics
-                                </a>
-                                <a href="{{ path('organization_package_webhook', {organization: organization.alias, package: package.id}) }}" class="dropdown-item">
-                                    {% include 'svg/link.svg' %} Webhook
-                                </a>
+                    {% if is_granted('ROLE_ORGANIZATION_MEMBER', organization) %}
+                        <td class="text-center">
+                            {% if package.webhookCreatedAt is not empty %}
+                                <span class="font-weight-bold" data-toggle="tooltip" title="{{ package.webhookCreatedAt | date_time }} ({{ gmt_offset() }})">
+                                    created
+                                </span>
+                            {% else %}
+                                <small>N/A</small>
                             {% endif %}
-                            {% if package.name or package.lastSyncError %}
+                        </td>
+                        <td class="text-center">
+                            {% if package.isSynchronizedSuccessfully %}
                                 <a
-                                    class="dropdown-item"
-                                    data-target="confirmation"
-                                    data-action="{{ path('organization_package_update', {organization: organization.alias, package: package.id }) }}"
-                                    data-method="POST"
-                                    href="#"
-                                    >
-                                        {% include 'svg/refresh.svg' %} Update
+                                    href="{{ path('organization_package_scan_results', {organization: organization.alias, package: package.id}) }}"
+                                    data-content="{% apply escape %}{% include 'organization/package/scanResultContent.html.twig' with {'result': package.lastScanResultContent, 'simple': true} %}{% endapply %}"
+                                    data-data-toggle="tooltip" title="{{ package.scanResultDate|date_time|time_diff }}"
+                                    data-toggle="scan-result-popover"
+                                >
+                                    {% if package.isScanResultOk %}
+                                        <span class="badge badge-success">{{ package.scanResultStatus }}</span>
+                                    {% elseif package.isScanResultPending or package.isScanResultNotAvailable %}
+                                        <span class="badge badge-warning">{{ package.scanResultStatus }}</span>
+                                    {% else %}
+                                        <span class="badge badge-danger">{{ package.scanResultStatus }}</span>
+                                    {% endif %}
                                 </a>
-                                {% if is_granted('ROLE_ORGANIZATION_OWNER', organization) %}
-                                    <a
-                                        class="dropdown-item"
-                                        data-target="confirmation"
-                                        data-action="{{ path('organization_package_remove', {organization: organization.alias, package: package.id }) }}"
-                                        data-method="DELETE"
-                                        href="#"
-                                        >
-                                            {% include 'svg/trash.svg' %} Remove
-                                    </a>
-                                {% endif %}
                             {% endif %}
-                            </div>
-                        </span>
-                    </td>
+                        </td>
+                        <td>
+                            {% include 'component/packageActions.html.twig' %}
+                        </td>
+                    {% endif %}
                 </tr>
             {% else %}
                 <tr>
-                    <td colspan="6" class="text-center">no packages added</td>
+                    <td colspan="7" class="text-center">No packages found</td>
                 </tr>
             {% endfor %}
         </tbody>
     </table>
     {% include 'component/pagination.html.twig' with {'path_name': 'organization_packages', 'path_params': {'organization': organization.alias}} %}
 </div>
+{% endblock %}
+
+{% block javascripts %}
+<script>
+    (function() {
+        $('[data-toggle="scan-result-popover"]').popover({
+            trigger: 'hover',
+            placement: 'left',
+            html: true
+        });
+    })();
+</script>
 {% endblock %}

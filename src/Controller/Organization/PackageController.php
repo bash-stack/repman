@@ -5,15 +5,19 @@ declare(strict_types=1);
 namespace Buddy\Repman\Controller\Organization;
 
 use Buddy\Repman\Entity\Organization\Package\Metadata;
-use Buddy\Repman\Entity\User;
 use Buddy\Repman\Entity\User\OAuthToken;
 use Buddy\Repman\Form\Type\Organization\AddPackageType;
+use Buddy\Repman\Form\Type\Organization\EditPackageType;
 use Buddy\Repman\Message\Organization\AddPackage;
 use Buddy\Repman\Message\Organization\Package\AddBitbucketHook;
 use Buddy\Repman\Message\Organization\Package\AddGitHubHook;
 use Buddy\Repman\Message\Organization\Package\AddGitLabHook;
+use Buddy\Repman\Message\Organization\Package\Update;
 use Buddy\Repman\Message\Organization\SynchronizePackage;
 use Buddy\Repman\Query\User\Model\Organization;
+use Buddy\Repman\Query\User\Model\Package;
+use Buddy\Repman\Query\User\UserQuery;
+use Buddy\Repman\Security\Model\User;
 use Buddy\Repman\Service\BitbucketApi;
 use Buddy\Repman\Service\GitHubApi;
 use Buddy\Repman\Service\GitLabApi;
@@ -33,11 +37,24 @@ use Symfony\Component\Validator\Constraints\NotBlank;
 
 final class PackageController extends AbstractController
 {
+    private UserQuery $userQuery;
+    private GithubApi $githubApi;
+    private GitlabApi $gitlabApi;
+    private BitbucketApi $bitbucketApi;
+
+    public function __construct(UserQuery $userQuery, GitHubApi $githubApi, GitLabApi $gitlabApi, BitbucketApi $bitbucketApi)
+    {
+        $this->userQuery = $userQuery;
+        $this->githubApi = $githubApi;
+        $this->gitlabApi = $gitlabApi;
+        $this->bitbucketApi = $bitbucketApi;
+    }
+
     /**
      * @IsGranted("ROLE_ORGANIZATION_OWNER", subject="organization")
      * @Route("/organization/{organization}/package/new/{type?}", name="organization_package_new", methods={"GET","POST"}, requirements={"organization"="%organization_pattern%"})
      */
-    public function packageNew(Organization $organization, Request $request, GithubApi $githubApi, GitlabApi $gitlabApi, BitbucketApi $bitbucketApi, ?string $type): Response
+    public function packageNew(Organization $organization, Request $request, ?string $type): Response
     {
         $form = $this->createForm(AddPackageType::class);
         $form->get('formUrl')->setData($this->generateUrl(
@@ -64,13 +81,13 @@ final class PackageController extends AbstractController
                     $response = $this->packageNewFromUrl($type, $form, $organization, $request);
                     break;
                 case 'github':
-                    $response = $this->packageNewFromGitHub($form, $organization, $request, $githubApi);
+                    $response = $this->packageNewFromGitHub($form, $organization, $request);
                     break;
                 case 'gitlab':
-                    $response = $this->packageNewFromGitLab($form, $organization, $request, $gitlabApi);
+                    $response = $this->packageNewFromGitLab($form, $organization, $request);
                     break;
                 case 'bitbucket':
-                    $response = $this->packageNewFromBitbucket($form, $organization, $request, $bitbucketApi);
+                    $response = $this->packageNewFromBitbucket($form, $organization, $request);
                     break;
                 default:
                     throw new NotFoundHttpException();
@@ -97,27 +114,69 @@ final class PackageController extends AbstractController
     }
 
     /**
-     * @param string[] $choices
-     *
-     * @return array<string|array>
+     * @Route("/organization/{organization}/package/{package}", name="organization_package_update", methods={"POST"}, requirements={"organization"="%organization_pattern%","package"="%uuid_pattern%"})
      */
-    private function repositoriesChoiceType(array $choices): array
+    public function updatePackage(Organization $organization, Package $package): Response
     {
-        return [
-            'repositories',
-            ChoiceType::class, [
-                'choices' => $choices,
-                'label' => false,
-                'expanded' => false,
-                'multiple' => true,
-                'attr' => [
-                    'class' => 'form-control selectpicker',
-                    'data-live-search' => 'true',
-                    'data-style' => 'btn-secondary',
-                    'title' => 'select repository',
-                ],
+        $this->dispatchMessage(new SynchronizePackage($package->id()));
+
+        $this->addFlash('success', 'Package will be synchronized in the background');
+
+        return $this->redirectToRoute('organization_packages', ['organization' => $organization->alias()]);
+    }
+
+    /**
+     * @IsGranted("ROLE_ORGANIZATION_OWNER", subject="organization")
+     * @Route("/organization/{organization}/package/{package}/edit", name="organization_package_edit", methods={"GET","POST"}, requirements={"organization"="%organization_pattern%","package"="%uuid_pattern%"})
+     */
+    public function editPackage(Organization $organization, Package $package, Request $request): Response
+    {
+        $form = $this->createForm(EditPackageType::class, [
+            'url' => $package->url(),
+            'keepLastReleases' => $package->keepLastReleases(),
+        ]);
+
+        $form->handleRequest($request);
+        if ($form->isSubmitted() && $form->isValid()) {
+            $data = $form->getData();
+
+            $this->dispatchMessage(new Update(
+                $package->id(),
+                $data['url'],
+                $data['keepLastReleases'],
+            ));
+
+            $this->dispatchMessage(new SynchronizePackage($package->id()));
+
+            $this->addFlash('success', 'Package will be synchronized in the background');
+
+            return $this->redirectToRoute('organization_packages', ['organization' => $organization->alias()]);
+        }
+
+        return $this->render('organization/package/edit.html.twig', [
+            'organization' => $organization,
+            'package' => $package,
+            'form' => $form->createView(),
+        ]);
+    }
+
+    /**
+     * @param string[] $choices
+     */
+    private function addRepositoriesChoiceType(FormInterface $form, array $choices): void
+    {
+        $form->add('repositories', ChoiceType::class, [
+            'choices' => $choices,
+            'label' => false,
+            'expanded' => false,
+            'multiple' => true,
+            'attr' => [
+                'class' => 'form-control selectpicker',
+                'data-live-search' => 'true',
+                'data-style' => 'btn-secondary',
+                'title' => 'select repository',
             ],
-        ];
+        ]);
     }
 
     private function packageHasBeenAdded(Organization $organization): Response
@@ -146,7 +205,9 @@ final class PackageController extends AbstractController
                 $id = Uuid::uuid4()->toString(),
                 $organization->id(),
                 $form->get('url')->getData(),
-                in_array($type, ['git', 'mercurial', 'subversion'], true) ? 'vcs' : $type
+                in_array($type, ['git', 'mercurial', 'subversion'], true) ? 'vcs' : $type,
+                [],
+                $form->get('keepLastReleases')->getData()
             ));
             $this->dispatchMessage(new SynchronizePackage($id));
 
@@ -156,16 +217,16 @@ final class PackageController extends AbstractController
         return null;
     }
 
-    private function packageNewFromGitHub(FormInterface $form, Organization $organization, Request $request, GithubApi $api): ?Response
+    private function packageNewFromGitHub(FormInterface $form, Organization $organization, Request $request): ?Response
     {
-        $token = $this->getUser()->oauthToken(OAuthToken::TYPE_GITHUB);
-        if ($token === null) {
+        $token = $this->userQuery->findOAuthAccessToken($this->getUser()->id(), OAuthToken::TYPE_GITHUB);
+        if ($token->isEmpty()) {
             return $this->redirectToRoute('fetch_github_package_token', ['organization' => $organization->alias()]);
         }
 
-        $repos = $api->repositories($token->accessToken());
+        $repos = $this->githubApi->repositories($token->get());
         $choices = array_combine($repos, $repos);
-        $form->add(...$this->repositoriesChoiceType(is_array($choices) ? $choices : []));
+        $this->addRepositoriesChoiceType($form, is_array($choices) ? $choices : []);
         $form->handleRequest($request);
 
         if ($form->isSubmitted() && $form->isValid()) {
@@ -175,7 +236,8 @@ final class PackageController extends AbstractController
                     $organization->id(),
                     "https://github.com/{$repo}",
                     'github-oauth',
-                    [Metadata::GITHUB_REPO_NAME => $repo]
+                    [Metadata::GITHUB_REPO_NAME => $repo],
+                    $form->get('keepLastReleases')->getData()
                 ));
                 $this->dispatchMessage(new SynchronizePackage($id));
                 $this->dispatchMessage(new AddGitHubHook($id));
@@ -187,15 +249,15 @@ final class PackageController extends AbstractController
         return null;
     }
 
-    private function packageNewFromGitLab(FormInterface $form, Organization $organization, Request $request, GitlabApi $api): ?Response
+    private function packageNewFromGitLab(FormInterface $form, Organization $organization, Request $request): ?Response
     {
-        $token = $this->getUser()->oauthToken(OAuthToken::TYPE_GITLAB);
-        if ($token === null) {
+        $token = $this->userQuery->findOAuthAccessToken($this->getUser()->id(), OAuthToken::TYPE_GITLAB);
+        if ($token->isEmpty()) {
             return $this->redirectToRoute('fetch_gitlab_package_token', ['organization' => $organization->alias()]);
         }
 
-        $projects = $api->projects($token->accessToken());
-        $form->add(...$this->repositoriesChoiceType(array_flip($projects->names())));
+        $projects = $this->gitlabApi->projects($token->get());
+        $this->addRepositoriesChoiceType($form, array_flip($projects->names()));
         $form->handleRequest($request);
 
         if ($form->isSubmitted() && $form->isValid()) {
@@ -205,7 +267,8 @@ final class PackageController extends AbstractController
                     $organization->id(),
                     $projects->get($projectId)->url(),
                     'gitlab-oauth',
-                    [Metadata::GITLAB_PROJECT_ID => $projectId]
+                    [Metadata::GITLAB_PROJECT_ID => $projectId],
+                    $form->get('keepLastReleases')->getData()
                 ));
                 $this->dispatchMessage(new SynchronizePackage($id));
                 $this->dispatchMessage(new AddGitLabHook($id));
@@ -217,15 +280,15 @@ final class PackageController extends AbstractController
         return null;
     }
 
-    private function packageNewFromBitbucket(FormInterface $form, Organization $organization, Request $request, BitbucketApi $api): ?Response
+    private function packageNewFromBitbucket(FormInterface $form, Organization $organization, Request $request): ?Response
     {
-        $token = $this->getUser()->oauthToken(OAuthToken::TYPE_BITBUCKET);
-        if ($token === null) {
+        $token = $this->userQuery->findOAuthAccessToken($this->getUser()->id(), OAuthToken::TYPE_BITBUCKET);
+        if ($token->isEmpty()) {
             return $this->redirectToRoute('fetch_bitbucket_package_token', ['organization' => $organization->alias()]);
         }
 
-        $repos = $api->repositories($token->accessToken());
-        $form->add(...$this->repositoriesChoiceType(array_flip($repos->names())));
+        $repos = $this->bitbucketApi->repositories($token->get());
+        $this->addRepositoriesChoiceType($form, array_flip($repos->names()));
         $form->handleRequest($request);
 
         if ($form->isSubmitted() && $form->isValid()) {
@@ -235,7 +298,8 @@ final class PackageController extends AbstractController
                     $organization->id(),
                     $repos->get($repoUuid)->url(),
                     'bitbucket-oauth',
-                    [Metadata::BITBUCKET_REPO_NAME => $repos->get($repoUuid)->name()]
+                    [Metadata::BITBUCKET_REPO_NAME => $repos->get($repoUuid)->name()],
+                    $form->get('keepLastReleases')->getData()
                 ));
                 $this->dispatchMessage(new SynchronizePackage($id));
                 $this->dispatchMessage(new AddBitbucketHook($id));

@@ -9,6 +9,7 @@ use Coduo\PHPMatcher\PHPUnit\PHPMatcherAssertions;
 use Symfony\Bundle\FrameworkBundle\KernelBrowser;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
 use Symfony\Component\DependencyInjection\ContainerInterface;
+use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
 
 abstract class FunctionalTestCase extends WebTestCase
 {
@@ -24,12 +25,22 @@ abstract class FunctionalTestCase extends WebTestCase
         $this->fixtures = new FixturesManager(self::$kernel->getContainer()->get('test.service_container'));
     }
 
+    public function contentFromStream(callable $request): string
+    {
+        ob_start();
+        $request();
+        $content = (string) ob_get_contents();
+        ob_end_clean();
+
+        return $content;
+    }
+
     /**
      * @param array<mixed> $parameters
      */
-    protected function urlTo(string $path, array $parameters = []): string
+    protected function urlTo(string $path, array $parameters = [], int $referenceType = UrlGeneratorInterface::ABSOLUTE_PATH): string
     {
-        return $this->container()->get('router')->generate($path, $parameters);
+        return $this->container()->get('router')->generate($path, $parameters, $referenceType);
     }
 
     protected function lastResponseBody(): string
@@ -37,7 +48,7 @@ abstract class FunctionalTestCase extends WebTestCase
         return (string) $this->client->getResponse()->getContent();
     }
 
-    protected function createAndLoginAdmin(string $email = 'test@buddy.works', string $password = 'password'): string
+    protected function createAndLoginAdmin(string $email = 'test@buddy.works', string $password = 'password', ?string $confirmToken = null): string
     {
         if (static::$booted) {
             self::ensureKernelShutdown();
@@ -48,7 +59,7 @@ abstract class FunctionalTestCase extends WebTestCase
         ]);
         $this->fixtures = new FixturesManager(self::$kernel->getContainer()->get('test.service_container'));
 
-        return $this->fixtures->createAdmin($email, $password);
+        return $this->fixtures->createAdmin($email, $password, $confirmToken);
     }
 
     protected function loginUser(string $email, string $password): void
@@ -66,5 +77,16 @@ abstract class FunctionalTestCase extends WebTestCase
     protected function container(): ContainerInterface
     {
         return self::$kernel->getContainer()->get('test.service_container');
+    }
+
+    protected function loginApiUser(string $token): void
+    {
+        if (static::$booted) {
+            self::ensureKernelShutdown();
+        }
+
+        $this->client = static::createClient([], [
+            'HTTP_X-API-TOKEN' => $token,
+        ]);
     }
 }

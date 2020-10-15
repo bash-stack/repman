@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Buddy\Repman\Query\User\OrganizationQuery;
 
+use Buddy\Repman\Query\Filter;
 use Buddy\Repman\Query\User\Model\Installs;
 use Buddy\Repman\Query\User\Model\Organization;
 use Buddy\Repman\Query\User\Model\Organization\Invitation;
@@ -28,7 +29,8 @@ final class DbalOrganizationQuery implements OrganizationQuery
     public function getByAlias(string $alias): Option
     {
         $data = $this->connection->fetchAssoc(
-            'SELECT id, name, alias FROM "organization" WHERE alias = :alias', [
+            'SELECT id, name, alias, has_anonymous_access
+            FROM "organization" WHERE alias = :alias', [
             ':alias' => $alias,
         ]);
 
@@ -41,8 +43,9 @@ final class DbalOrganizationQuery implements OrganizationQuery
 
     public function getByInvitation(string $token, string $email): Option
     {
-        $data = $this->connection->fetchAssoc('SELECT o.id, o.name, o.alias
-            FROM "organization" o 
+        $data = $this->connection->fetchAssoc(
+            'SELECT o.id, o.name, o.alias, o.has_anonymous_access
+            FROM "organization" o
             JOIN organization_invitation i ON o.id = i.organization_id
             WHERE i.token = :token AND i.email = :email
         ', [
@@ -60,24 +63,19 @@ final class DbalOrganizationQuery implements OrganizationQuery
     /**
      * @return Token[]
      */
-    public function findAllTokens(string $organizationId, int $limit = 20, int $offset = 0): array
+    public function findAllTokens(string $organizationId, Filter $filter): array
     {
         return array_map(function (array $data): Token {
-            return new Token(
-                $data['name'],
-                $data['value'],
-                new \DateTimeImmutable($data['created_at']),
-                $data['last_used_at'] !== null ? new \DateTimeImmutable($data['last_used_at']) : null
-            );
+            return $this->hydrateToken($data);
         }, $this->connection->fetchAll('
-            SELECT name, value, created_at, last_used_at 
-            FROM organization_token 
+            SELECT name, value, created_at, last_used_at
+            FROM organization_token
             WHERE organization_id = :id
             ORDER BY UPPER(name) ASC
             LIMIT :limit OFFSET :offset', [
             ':id' => $organizationId,
-            ':limit' => $limit,
-            ':offset' => $offset,
+            ':limit' => $filter->getLimit(),
+            ':offset' => $filter->getOffset(),
         ]));
     }
 
@@ -107,7 +105,7 @@ final class DbalOrganizationQuery implements OrganizationQuery
         );
     }
 
-    public function findAllInvitations(string $organizationId, int $limit = 20, int $offset = 0): array
+    public function findAllInvitations(string $organizationId, Filter $filter): array
     {
         return array_map(function (array $row): Invitation {
             return new Invitation(
@@ -122,8 +120,8 @@ final class DbalOrganizationQuery implements OrganizationQuery
             ORDER BY email ASC
             LIMIT :limit OFFSET :offset', [
             ':id' => $organizationId,
-            ':limit' => $limit,
-            ':offset' => $offset,
+            ':limit' => $filter->getLimit(),
+            ':offset' => $filter->getOffset(),
         ]));
     }
 
@@ -140,7 +138,7 @@ final class DbalOrganizationQuery implements OrganizationQuery
     /**
      * @return Member[]
      */
-    public function findAllMembers(string $organizationId, int $limit = 20, int $offset = 0): array
+    public function findAllMembers(string $organizationId, Filter $filter): array
     {
         return array_map(function (array $row): Member {
             return new Member(
@@ -149,15 +147,15 @@ final class DbalOrganizationQuery implements OrganizationQuery
                 $row['role']
             );
         }, $this->connection->fetchAll('
-            SELECT u.id, u.email, m.role 
+            SELECT u.id, u.email, m.role
             FROM organization_member AS m
             JOIN "user" u ON u.id = m.user_id
             WHERE m.organization_id = :id
             ORDER BY u.email ASC
             LIMIT :limit OFFSET :offset', [
             ':id' => $organizationId,
-            ':limit' => $limit,
-            ':offset' => $offset,
+            ':limit' => $filter->getLimit(),
+            ':offset' => $filter->getOffset(),
         ]));
     }
 
@@ -198,6 +196,23 @@ final class DbalOrganizationQuery implements OrganizationQuery
     }
 
     /**
+     * @return Option<Token>
+     */
+    public function findToken(string $organizationId, string $value): Option
+    {
+        $data = $this->connection->fetchAssoc(
+            'SELECT name, value, created_at, last_used_at
+            FROM organization_token
+            WHERE organization_id = :organization_id AND value = :value
+            LIMIT 1', [
+            ':organization_id' => $organizationId,
+            ':value' => $value,
+        ]);
+
+        return $data === false ? Option::none() : Option::some($this->hydrateToken($data));
+    }
+
+    /**
      * @param array<mixed> $data
      */
     private function hydrateOrganization(array $data): Organization
@@ -214,7 +229,21 @@ final class DbalOrganizationQuery implements OrganizationQuery
             $data['name'],
             $data['alias'],
             array_map(fn (array $row) => new Member($row['user_id'], $row['email'], $row['role']), $members),
+            $data['has_anonymous_access'],
             $token !== false ? $token : null
+        );
+    }
+
+    /**
+     * @param array<string,mixed> $data
+     */
+    private function hydrateToken(array $data): Token
+    {
+        return new Token(
+            $data['name'],
+            $data['value'],
+            new \DateTimeImmutable($data['created_at']),
+            $data['last_used_at'] !== null ? new \DateTimeImmutable($data['last_used_at']) : null
         );
     }
 }

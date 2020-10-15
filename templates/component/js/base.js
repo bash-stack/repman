@@ -22,4 +22,14 @@
         $(this).parent().find('[data-type="token"]').removeClass('d-none');
         $(this).remove();
     });
+
+    $('[data-toggle="popover"]').popover({
+        trigger: 'hover'
+    });
+
+    $('[data-toggle="tooltip"]').tooltip();
+
+    $('.number-format').each(function() {
+        $(this).text(parseInt($(this).text()).toLocaleString());
+    });
 })();

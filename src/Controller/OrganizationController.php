@@ -4,14 +4,13 @@ declare(strict_types=1);
 
 namespace Buddy\Repman\Controller;
 
-use Buddy\Repman\Entity\User;
 use Buddy\Repman\Form\Type\Organization\ChangeAliasType;
+use Buddy\Repman\Form\Type\Organization\ChangeAnonymousAccessType;
 use Buddy\Repman\Form\Type\Organization\ChangeNameType;
-use Buddy\Repman\Form\Type\Organization\CreateType;
 use Buddy\Repman\Form\Type\Organization\GenerateTokenType;
 use Buddy\Repman\Message\Organization\ChangeAlias;
+use Buddy\Repman\Message\Organization\ChangeAnonymousAccess;
 use Buddy\Repman\Message\Organization\ChangeName;
-use Buddy\Repman\Message\Organization\CreateOrganization;
 use Buddy\Repman\Message\Organization\GenerateToken;
 use Buddy\Repman\Message\Organization\Package\AddBitbucketHook;
 use Buddy\Repman\Message\Organization\Package\AddGitHubHook;
@@ -23,15 +22,17 @@ use Buddy\Repman\Message\Organization\RegenerateToken;
 use Buddy\Repman\Message\Organization\RemoveOrganization;
 use Buddy\Repman\Message\Organization\RemovePackage;
 use Buddy\Repman\Message\Organization\RemoveToken;
-use Buddy\Repman\Message\Organization\SynchronizePackage;
+use Buddy\Repman\Message\Security\ScanPackage;
+use Buddy\Repman\Query\Filter;
 use Buddy\Repman\Query\User\Model\Installs\Day;
 use Buddy\Repman\Query\User\Model\Organization;
+use Buddy\Repman\Query\User\Model\Organization\Token;
 use Buddy\Repman\Query\User\Model\Package;
 use Buddy\Repman\Query\User\OrganizationQuery;
 use Buddy\Repman\Query\User\PackageQuery;
+use Buddy\Repman\Query\User\PackageQuery\Filter as PackageFilter;
+use Buddy\Repman\Security\Model\User;
 use Buddy\Repman\Service\ExceptionHandler;
-use Buddy\Repman\Service\Organization\AliasGenerator;
-use Ramsey\Uuid\Uuid;
 use Sensio\Bundle\FrameworkExtraBundle\Configuration\IsGranted;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\HttpFoundation\JsonResponse;
@@ -54,34 +55,6 @@ final class OrganizationController extends AbstractController
     }
 
     /**
-     * @Route("/organization/new", name="organization_create", methods={"GET","POST"})
-     */
-    public function create(Request $request, AliasGenerator $aliasGenerator): Response
-    {
-        $form = $this->createForm(CreateType::class);
-        $form->handleRequest($request);
-
-        if ($form->isSubmitted() && $form->isValid()) {
-            $user = $this->getUser();
-
-            $this->dispatchMessage(new CreateOrganization(
-                $id = Uuid::uuid4()->toString(),
-                $user->id()->toString(),
-                $name = $form->get('name')->getData()
-            ));
-            $this->dispatchMessage(new GenerateToken($id, 'default'));
-
-            $this->addFlash('success', sprintf('Organization "%s" has been created', $name));
-
-            return $this->redirectToRoute('organization_overview', ['organization' => $aliasGenerator->generate($name)]);
-        }
-
-        return $this->render('organization/create.html.twig', [
-            'form' => $form->createView(),
-        ]);
-    }
-
-    /**
      * @Route("/organization/{organization}/overview", name="organization_overview", methods={"GET"}, requirements={"organization"="%organization_pattern%"})
      */
     public function overview(Organization $organization): Response
@@ -97,28 +70,21 @@ final class OrganizationController extends AbstractController
      */
     public function packages(Organization $organization, Request $request): Response
     {
-        $count = $this->packageQuery->count($organization->id());
-        if ($count === 0 && $organization->isOwner($this->getUser()->id()->toString())) {
+        $filter = PackageFilter::fromRequest($request, 'name');
+
+        $count = $this->packageQuery->count($organization->id(), $filter);
+
+        // If the filtered count has no results, we need to check if the organization has no packages
+        if ($count === 0 && $this->hasNoPackages($organization)) {
             return $this->redirectToRoute('organization_package_new', ['organization' => $organization->alias()]);
         }
 
         return $this->render('organization/packages.html.twig', [
-            'packages' => $this->packageQuery->findAll($organization->id(), 20, (int) $request->get('offset', 0)),
+            'packages' => $this->packageQuery->findAll($organization->id(), $filter),
+            'filter' => $filter,
             'count' => $count,
             'organization' => $organization,
         ]);
-    }
-
-    /**
-     * @Route("/organization/{organization}/package/{package}", name="organization_package_update", methods={"POST"}, requirements={"organization"="%organization_pattern%","package"="%uuid_pattern%"})
-     */
-    public function updatePackage(Organization $organization, Package $package): Response
-    {
-        $this->dispatchMessage(new SynchronizePackage($package->id()));
-
-        $this->addFlash('success', 'Package will be updated in the background');
-
-        return $this->redirectToRoute('organization_packages', ['organization' => $organization->alias()]);
     }
 
     /**
@@ -137,6 +103,23 @@ final class OrganizationController extends AbstractController
         $this->addFlash('success', 'Package has been successfully removed');
 
         return $this->redirectToRoute('organization_packages', ['organization' => $organization->alias()]);
+    }
+
+    /**
+     * @Route("/organization/{organization}/package/{package}/details", name="organization_package_details", methods={"GET"}, requirements={"organization"="%organization_pattern%","package"="%uuid_pattern%"})
+     */
+    public function packageDetails(Organization $organization, Package $package, Request $request): Response
+    {
+        $filter = Filter::fromRequest($request);
+
+        return $this->render('organization/package/details.html.twig', [
+            'organization' => $organization,
+            'package' => $package,
+            'filter' => $filter,
+            'count' => $this->packageQuery->versionCount($package->id()),
+            'versions' => $this->packageQuery->getVersions($package->id(), $filter),
+            'installs' => $this->packageQuery->getInstalls($package->id(), 0),
+        ]);
     }
 
     /**
@@ -227,21 +210,24 @@ final class OrganizationController extends AbstractController
      */
     public function tokens(Organization $organization, Request $request): Response
     {
+        $filter = Filter::fromRequest($request);
+
         return $this->render('organization/tokens.html.twig', [
-            'tokens' => $this->organizationQuery->findAllTokens($organization->id(), 20, (int) $request->get('offset', 0)),
+            'tokens' => $this->organizationQuery->findAllTokens($organization->id(), $filter),
             'count' => $this->organizationQuery->tokenCount($organization->id()),
             'organization' => $organization,
+            'filter' => $filter,
         ]);
     }
 
     /**
      * @Route("/organization/{organization}/token/{token}/regenerate", name="organization_token_regenerate", methods={"POST"}, requirements={"organization"="%organization_pattern%"})
      */
-    public function regenerateToken(Organization $organization, string $token): Response
+    public function regenerateToken(Organization $organization, Token $token): Response
     {
         $this->dispatchMessage(new RegenerateToken(
             $organization->id(),
-            $token
+            $token->value()
         ));
 
         $this->addFlash('success', 'Token has been successfully regenerated');
@@ -252,11 +238,11 @@ final class OrganizationController extends AbstractController
     /**
      * @Route("/organization/{organization}/token/{token}", name="organization_token_remove", methods={"DELETE"}, requirements={"organization"="%organization_pattern%"})
      */
-    public function removeToken(Organization $organization, string $token): Response
+    public function removeToken(Organization $organization, Token $token): Response
     {
         $this->dispatchMessage(new RemoveToken(
             $organization->id(),
-            $token
+            $token->value()
         ));
 
         $this->addFlash('success', 'Token has been successfully removed');
@@ -288,10 +274,20 @@ final class OrganizationController extends AbstractController
             return $this->redirectToRoute('organization_settings', ['organization' => $aliasForm->get('alias')->getData()]);
         }
 
+        $anonymousAccessForm = $this->createForm(ChangeAnonymousAccessType::class, ['hasAnonymousAccess' => $organization->hasAnonymousAccess()]);
+        $anonymousAccessForm->handleRequest($request);
+        if ($anonymousAccessForm->isSubmitted() && $anonymousAccessForm->isValid()) {
+            $this->dispatchMessage(new ChangeAnonymousAccess($organization->id(), $anonymousAccessForm->get('hasAnonymousAccess')->getData()));
+            $this->addFlash('success', 'Anonymous access has been successfully changed.');
+
+            return $this->redirectToRoute('organization_settings', ['organization' => $organization->alias()]);
+        }
+
         return $this->render('organization/settings.html.twig', [
             'organization' => $organization,
             'renameForm' => $renameForm->createView(),
             'aliasForm' => $aliasForm->createView(),
+            'anonymousAccessForm' => $anonymousAccessForm->createView(),
         ]);
     }
 
@@ -321,12 +317,32 @@ final class OrganizationController extends AbstractController
         ]);
     }
 
-    protected function getUser(): User
+    /**
+     * @Route("/organization/{organization}/package/{package}/scan", name="organization_package_scan", methods={"POST"}, requirements={"organization"="%organization_pattern%","package"="%uuid_pattern%"})
+     */
+    public function scanPackage(Organization $organization, Package $package): Response
     {
-        /** @var User $user */
-        $user = parent::getUser();
+        $this->dispatchMessage(new ScanPackage($package->id()));
 
-        return $user;
+        $this->addFlash('success', 'Package will be scanned in the background');
+
+        return $this->redirectToRoute('organization_packages', ['organization' => $organization->alias()]);
+    }
+
+    /**
+     * @Route("/organization/{organization}/package/{package}/scan-results", name="organization_package_scan_results", methods={"GET","POST"}, requirements={"organization"="%organization_pattern%","package"="%uuid_pattern%"})
+     */
+    public function packageScanResults(Organization $organization, Package $package, Request $request): Response
+    {
+        $filter = Filter::fromRequest($request);
+
+        return $this->render('organization/package/scanResults.html.twig', [
+            'organization' => $organization,
+            'package' => $package,
+            'filter' => $filter,
+            'results' => $this->packageQuery->getScanResults($package->id(), $filter),
+            'count' => $this->packageQuery->getScanResultsCount($package->id()),
+        ]);
     }
 
     private function tryToRemoveWebhook(Package $package): void
@@ -348,5 +364,14 @@ final class OrganizationController extends AbstractController
                 $this->exceptionHandler->handle($exception);
             }
         }
+    }
+
+    private function hasNoPackages(Organization $organization): bool
+    {
+        $user = parent::getUser();
+
+        return $user instanceof User &&
+            $organization->isOwner($user->id()) &&
+            $this->packageQuery->count($organization->id(), new PackageFilter()) === 0;
     }
 }

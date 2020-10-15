@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Buddy\Repman\Tests\Integration;
 
 use Buddy\Repman\Entity\Organization\Member;
+use Buddy\Repman\Entity\Organization\Package\ScanResult;
+use Buddy\Repman\Entity\Organization\Package\Version;
+use Buddy\Repman\Message\Admin\ChangeConfig;
 use Buddy\Repman\Message\Organization\AddDownload;
 use Buddy\Repman\Message\Organization\AddPackage;
 use Buddy\Repman\Message\Organization\CreateOrganization;
@@ -14,12 +17,15 @@ use Buddy\Repman\Message\Organization\Member\InviteUser;
 use Buddy\Repman\Message\Organization\SynchronizePackage;
 use Buddy\Repman\Message\Proxy\AddDownloads;
 use Buddy\Repman\Message\User\AddOAuthToken;
+use Buddy\Repman\Message\User\ConfirmEmail;
 use Buddy\Repman\Message\User\CreateOAuthUser;
 use Buddy\Repman\Message\User\CreateUser;
 use Buddy\Repman\Message\User\DisableUser;
-use Buddy\Repman\MessageHandler\Organization\SynchronizePackageHandler;
+use Buddy\Repman\Message\User\GenerateApiToken;
 use Buddy\Repman\MessageHandler\Proxy\AddDownloadsHandler;
+use Buddy\Repman\Repository\OrganizationRepository;
 use Buddy\Repman\Repository\PackageRepository;
+use Buddy\Repman\Repository\ScanResultRepository;
 use Buddy\Repman\Service\Organization\TokenGenerator;
 use Buddy\Repman\Service\PackageSynchronizer;
 use Doctrine\ORM\EntityManagerInterface;
@@ -61,9 +67,9 @@ final class FixturesManager
         $this->dispatchMessage(new CreateOAuthUser($email));
     }
 
-    public function createAdmin(string $email, string $password): string
+    public function createAdmin(string $email, string $password, ?string $confirmToken = null): string
     {
-        return $this->createUser($email, $password, ['ROLE_ADMIN']);
+        return $this->createUser($email, $password, ['ROLE_ADMIN'], $confirmToken);
     }
 
     public function createOrganization(string $name, string $ownerId): string
@@ -79,14 +85,22 @@ final class FixturesManager
         return $id;
     }
 
-    public function createToken(string $orgId, string $value): void
+    public function createToken(string $orgId, string $value, string $name = 'token'): void
     {
         $this->container->get(TokenGenerator::class)->setNextToken($value);
         $this->dispatchMessage(
             new GenerateToken(
                 $orgId,
-                'token'
+                $name
             )
+        );
+    }
+
+    public function createApiToken(string $userId, string $value = 'api-token', string $name = 'token'): void
+    {
+        $this->container->get(TokenGenerator::class)->setNextToken($value);
+        $this->dispatchMessage(
+            new GenerateApiToken($userId, $name)
         );
     }
 
@@ -104,12 +118,13 @@ final class FixturesManager
         return $userId;
     }
 
-    public function createPackage(string $id, string $organization = 'buddy'): void
+    public function createPackage(string $id, string $organization = 'buddy', string $organizationId = null): void
     {
+        $organization = $organizationId !== null ? $organizationId : $this->createOrganization($organization, $this->createUser());
         $this->dispatchMessage(
             new AddPackage(
                 $id,
-                $this->createOrganization($organization, $this->createUser()),
+                $organization,
                 'https://github.com/buddy-works/repman',
                 'vcs'
             )
@@ -141,13 +156,13 @@ final class FixturesManager
         $this->container->get('doctrine.orm.entity_manager')->flush($package);
     }
 
-    public function addPackageDownload(int $count, string $packageId, string $version = '1.0.0'): void
+    public function addPackageDownload(int $count, string $packageId, string $version = '1.0.0', ?\DateTimeImmutable $date = null): void
     {
-        Stream::range(1, $count)->forEach(function (int $index) use ($packageId, $version): void {
+        Stream::range(1, $count)->forEach(function (int $index) use ($packageId, $version, $date): void {
             $this->dispatchMessage(new AddDownload(
                 $packageId,
                 $version,
-                new \DateTimeImmutable(),
+                $date ?? new \DateTimeImmutable(),
                 '192.168.0.1',
                 'Composer 19.10'
             ));
@@ -175,14 +190,17 @@ final class FixturesManager
     public function syncPackageWithError(string $packageId, string $error): void
     {
         $this->container->get(PackageSynchronizer::class)->setError($error);
-        $this->container->get(SynchronizePackageHandler::class)(new SynchronizePackage($packageId));
+        $this->dispatchMessage(new SynchronizePackage($packageId));
         $this->container->get(EntityManagerInterface::class)->flush();
     }
 
-    public function syncPackageWithData(string $packageId, string $name, string $description, string $latestReleasedVersion, \DateTimeImmutable $latestReleaseDate): void
+    /**
+     * @param Version[] $versions
+     */
+    public function syncPackageWithData(string $packageId, string $name, string $description, string $latestReleasedVersion, \DateTimeImmutable $latestReleaseDate, array $versions = []): void
     {
-        $this->container->get(PackageSynchronizer::class)->setData($name, $description, $latestReleasedVersion, $latestReleaseDate);
-        $this->container->get(SynchronizePackageHandler::class)(new SynchronizePackage($packageId));
+        $this->container->get(PackageSynchronizer::class)->setData($name, $description, $latestReleasedVersion, $latestReleaseDate, $versions);
+        $this->dispatchMessage(new SynchronizePackage($packageId));
         $this->container->get(EntityManagerInterface::class)->flush();
     }
 
@@ -207,12 +225,54 @@ final class FixturesManager
         return $id;
     }
 
-    public function prepareRepoFiles(string $organization = 'buddy'): void
+    public function prepareRepoFiles(): void
     {
         $this->filesystem->mirror(
-            __DIR__.'/../Resources/fixtures/'.$organization,
-            __DIR__.'/../Resources/'.$organization
+            __DIR__.'/../Resources/fixtures/buddy/dist/buddy-works/repman',
+            __DIR__.'/../Resources/buddy/dist/buddy-works/repman',
+            null,
+            ['delete' => true]
         );
+    }
+
+    /**
+     * @param mixed[] $content
+     */
+    public function addScanResult(string $packageId, string $status, array $content = ['composer.lock' => []]): void
+    {
+        $date = new \DateTimeImmutable();
+        $package = $this->container
+            ->get(PackageRepository::class)
+            ->getById(Uuid::fromString($packageId));
+        $package->setScanResult($status, $date, $content);
+        $this->container->get(ScanResultRepository::class)->add(
+            new ScanResult(
+                Uuid::uuid4(),
+                $package,
+                $date,
+                $status,
+                $content
+            )
+        );
+        $this->container->get(EntityManagerInterface::class)->flush();
+    }
+
+    public function confirmUserEmail(string $token): void
+    {
+        $this->dispatchMessage(new ConfirmEmail($token));
+        $this->container->get(EntityManagerInterface::class)->flush();
+    }
+
+    public function enableAnonymousUserAccess(string $organizationId): void
+    {
+        $organization = $this->container->get(OrganizationRepository::class)->getById(Uuid::fromString($organizationId));
+        $organization->changeAnonymousAccess(true);
+        $this->container->get('doctrine.orm.entity_manager')->flush($organization);
+    }
+
+    public function changeConfig(string $key, string $value): void
+    {
+        $this->dispatchMessage(new ChangeConfig([$key => $value]));
     }
 
     private function dispatchMessage(object $message): void

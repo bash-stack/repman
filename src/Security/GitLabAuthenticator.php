@@ -4,9 +4,6 @@ declare(strict_types=1);
 
 namespace Buddy\Repman\Security;
 
-use Buddy\Repman\Entity\User;
-use Buddy\Repman\Repository\UserRepository;
-use Buddy\Repman\Service\GitHubApi;
 use KnpU\OAuth2ClientBundle\Client\ClientRegistry;
 use KnpU\OAuth2ClientBundle\Security\Authenticator\SocialAuthenticator;
 use League\OAuth2\Client\Provider\Exception\IdentityProviderException;
@@ -19,22 +16,17 @@ use Symfony\Component\Routing\RouterInterface;
 use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
 use Symfony\Component\Security\Core\Exception\AuthenticationException;
 use Symfony\Component\Security\Core\Exception\CustomUserMessageAuthenticationException;
-use Symfony\Component\Security\Core\Exception\UsernameNotFoundException;
 use Symfony\Component\Security\Core\User\UserProviderInterface;
 
 final class GitLabAuthenticator extends SocialAuthenticator
 {
     private ClientRegistry $clientRegistry;
-    private UserRepository $users;
-    private GitHubApi $gitHubApi;
     private RouterInterface $router;
     private Session $session;
 
-    public function __construct(ClientRegistry $clientRegistry, UserRepository $users, GitHubApi $gitHubApi, RouterInterface $router, Session $session)
+    public function __construct(ClientRegistry $clientRegistry, RouterInterface $router, Session $session)
     {
         $this->clientRegistry = $clientRegistry;
-        $this->users = $users;
-        $this->gitHubApi = $gitHubApi;
         $this->router = $router;
         $this->session = $session;
     }
@@ -58,12 +50,7 @@ final class GitLabAuthenticator extends SocialAuthenticator
             throw new CustomUserMessageAuthenticationException($exception->getMessage());
         }
 
-        $user = $this->users->findOneBy(['email' => $gitLabUser->getEmail()]);
-        if (!$user instanceof User) {
-            throw new UsernameNotFoundException();
-        }
-
-        return $user;
+        return $userProvider->loadUserByUsername($gitLabUser->getEmail());
     }
 
     public function onAuthenticationFailure(Request $request, AuthenticationException $exception): Response

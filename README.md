@@ -16,6 +16,7 @@
 - hosts your private packages
 - allows to create individual access tokens
 - supports private package import from **GitHub**, **GitLab** and **Bitbucket** with one click
+- REST API
 
 Documentation: [https://repman.io/docs/](https://repman.io/docs/)
 
@@ -97,6 +98,13 @@ symfony proxy:domain:attach your-organization.repman
 ### CLI commands
 
 - `bin/console repman:metadata:clear-cache` - clear packages metadata cache (json files)
+- `bin/console repman:create:admin <email> [<password>]` - create a new user with admin privileges
+- `bin/console repman:create:user <email> [<password>]` - create a new (normal) user
+- `bin/console repman:proxy:sync-releases` - sync proxy releases with packagist.org
+- `bin/console repman:security:scan-all` - scan all synchronized packages
+- `bin/console repman:security:update-db` - update security advisories database, scan all packages if updated
+- `bin/console repman:package:synchronize <packageId>` - synchronize given package
+- `bin/console repman:package:clear-old-dists` - clear old private dev distributions files
 
 ## API Integration
 
